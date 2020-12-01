@@ -2,6 +2,7 @@ import sys
 from datetime import datetime, timedelta
 
 from weibo.utils.region import region_dict
+import json
 
 
 def convert_weibo_type(weibo_type):
@@ -98,3 +99,9 @@ def standardize_date(created_at):
         time = created_at[11:]
         created_at = year + '-' + month + '-' + day + ' ' + time
     return created_at
+
+
+def load_cookies(file):
+    with open(file) as fin:
+        cookies = json.load(fin)
+    return cookies

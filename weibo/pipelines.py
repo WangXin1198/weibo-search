@@ -8,6 +8,8 @@
 import copy
 import csv
 import os
+import json
+import datetime
 
 import scrapy
 from scrapy.exceptions import DropItem
@@ -20,7 +22,7 @@ settings = get_project_settings()
 
 class CsvPipeline(object):
     def process_item(self, item, spider):
-        base_dir = '结果文件' + os.sep + item['keyword']
+        base_dir = '结果文件CSV' + os.sep + item['keyword']
         if not os.path.isdir(base_dir):
             os.makedirs(base_dir)
         file_path = base_dir + os.sep + item['keyword'] + '.csv'
@@ -43,6 +45,34 @@ class CsvPipeline(object):
         return item
 
 
+class JsonPipeline(object):
+    # 存储为json文件
+    def process_item(self, item, spider):
+        base_dir = '结果文件Json' + os.sep + item['keyword']
+        if not os.path.isdir(base_dir):
+            os.makedirs(base_dir)
+
+        # 存储微博数据
+        if item.get('weibo', None):
+            file_path = base_dir + os.sep + item['keyword'] + '.json'
+            data = {}
+            for key in item['weibo'].keys():
+                data[key] = item['weibo'][key]
+            with open(file_path, 'a', encoding='utf-8-sig', newline='') as f:
+                f.write(json.dumps(data, ensure_ascii=False)+'\n')
+
+        # 存储评论数据
+        if item.get('comment', None):
+            file_path = base_dir + os.sep + 'comments.json'
+            data = {}
+            for key in item['comment'].keys():
+                data[key] = item['comment'][key]
+            with open(file_path, 'a', encoding='utf-8-sig', newline='') as f:
+                f.write(json.dumps(data, ensure_ascii=False)+'\n')
+
+        return item
+
+
 class MyImagesPipeline(ImagesPipeline):
     def get_media_requests(self, item, info):
         if len(item['weibo']['pics']) == 1:
@@ -50,7 +80,7 @@ class MyImagesPipeline(ImagesPipeline):
                                  meta={
                                      'item': item,
                                      'sign': ''
-                                 })
+            })
         else:
             sign = 0
             for image_url in item['weibo']['pics']:
@@ -204,10 +234,29 @@ class MysqlPipeline(object):
 class DuplicatesPipeline(object):
     def __init__(self):
         self.ids_seen = set()
+        self.comment_ids_seen = set()
+        self.weibo_num = 0
+        self.comment_num = 0
 
     def process_item(self, item, spider):
-        if item['weibo']['id'] in self.ids_seen:
-            raise DropItem("过滤重复微博: %s" % item)
+        if item.get('weibo', None):
+            if item['weibo']['id'] in self.ids_seen:
+                raise DropItem("过滤重复微博: %s" % item)
+            else:
+                self.ids_seen.add(item['weibo']['id'])
+                self.weibo_num += 1
+                if self.weibo_num % 20 == 0:
+                    print("weibo_num={0}\tweibo_date={1}\tcomment_num={2}".format(
+                        self.weibo_num, item['weibo']['created_at'], self.comment_num))
+                return item
+
+        elif item.get('comment', None):
+            if item['comment']['id'] in self.comment_ids_seen:
+                raise DropItem("过滤重复评论: %s" % item)
+            else:
+                self.comment_ids_seen.add(item['comment']['id'])
+                self.comment_num += 1
+                return item
+
         else:
-            self.ids_seen.add(item['weibo']['id'])
             return item

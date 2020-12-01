@@ -2,6 +2,7 @@
 import os
 import re
 import sys
+import json
 from datetime import datetime, timedelta
 from urllib.parse import unquote
 
@@ -9,8 +10,17 @@ import scrapy
 import weibo.utils.util as util
 from scrapy.exceptions import CloseSpider
 from scrapy.utils.project import get_project_settings
-from weibo.items import WeiboItem
+from weibo.items import WeiboItem, CommentItem
 
+
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.common.by import By
+
+import time
+from tqdm import tqdm
 
 class SearchSpider(scrapy.Spider):
     name = 'search'
@@ -35,10 +45,20 @@ class SearchSpider(scrapy.Spider):
     start_date = settings.get('START_DATE',
                               datetime.now().strftime('%Y-%m-%d'))
     end_date = settings.get('END_DATE', datetime.now().strftime('%Y-%m-%d'))
+
+    login_cookies=util.load_cookies('./cookies/cookies.json')
     mongo_error = False
     pymongo_error = False
     mysql_error = False
     pymysql_error = False
+
+    #self.cookies
+    # cookies=[]
+    # DEFAULT_REQUEST_HEADERS=settings.get('DEFAULT_REQUEST_HEADERS')
+    # for name_value in DEFAULT_REQUEST_HEADERS['cookie'].split(' '):
+    #     name,value=name_value.split('=')
+    #     cookies.append({'name':name,'value':value})
+    # print(cookies)
 
     def start_requests(self):
         start_date = datetime.strptime(self.start_date, '%Y-%m-%d')
@@ -57,7 +77,8 @@ class SearchSpider(scrapy.Spider):
                                      callback=self.parse,
                                      meta={
                                          'base_url': base_url,
-                                         'keyword': keyword
+                                         'keyword': keyword,
+                                         'url': url
                                      })
             else:
                 for region in self.regions.values():
@@ -73,7 +94,8 @@ class SearchSpider(scrapy.Spider):
                                          meta={
                                              'base_url': base_url,
                                              'keyword': keyword,
-                                             'province': region
+                                             'province': region,
+                                             'url': url
                                          })
 
     def check_environment(self):
@@ -95,6 +117,7 @@ class SearchSpider(scrapy.Spider):
         base_url = response.meta.get('base_url')
         keyword = response.meta.get('keyword')
         province = response.meta.get('province')
+        url = response.meta.get('url')
         is_empty = response.xpath(
             '//div[@class="card card-no-result s-pt20b40"]')
         page_count = len(response.xpath('//ul[@class="s-scroll"]/li'))
@@ -353,12 +376,20 @@ class SearchSpider(scrapy.Spider):
                 weibo['id'] = sel.xpath('@mid').extract_first()
                 weibo['bid'] = sel.xpath(
                     '(.//p[@class="from"])[last()]/a[1]/@href').extract_first(
-                    ).split('/')[-1].split('?')[0]
+                ).split('/')[-1].split('?')[0]
                 weibo['user_id'] = info[0].xpath(
                     'div[2]/a/@href').extract_first().split('?')[0].split(
                         '/')[-1]
                 weibo['screen_name'] = info[0].xpath(
                     'div[2]/a/@nick-name').extract_first()
+
+                # 用户类别
+                user_type=info[0].xpath('div[2]/a[2]/@title').extract_first()
+                if not user_type:
+                    weibo['user_type'] ="其他"
+                else:
+                    weibo['user_type'] =user_type
+
                 txt_sel = sel.xpath('.//p[@class="txt"]')[0]
                 retweet_sel = sel.xpath('.//div[@class="card-comment"]')
                 retweet_txt_sel = ''
@@ -417,6 +448,21 @@ class SearchSpider(scrapy.Spider):
                 comments_count = re.findall(r'\d+.*', comments_count)
                 weibo['comments_count'] = comments_count[
                     0] if comments_count else '0'
+
+                #Crawl Comments
+                if '万' in weibo['comments_count'] or int(weibo['comments_count'])>20:
+                    #详细微博的url
+                    comment_url='https://weibo.com/'+weibo['user_id']+'/'+weibo['bid']
+                    yield scrapy.Request(url=comment_url,
+                                        callback=self.parse_comments,
+                                        meta={
+                                            'weibo_id': weibo['id'],
+                                            'weibo_bid':weibo['bid'],
+                                            'weibo_user_id':weibo['user_id'],
+                                            'keyword': keyword
+                                            })
+                                    
+
                 attitudes_count = sel.xpath(
                     '(.//a[@action-type="feed_list_like"])[last()]/em/text()'
                 ).extract_first()
@@ -424,7 +470,7 @@ class SearchSpider(scrapy.Spider):
                                             if attitudes_count else '0')
                 created_at = sel.xpath(
                     '(.//p[@class="from"])[last()]/a[1]/text()').extract_first(
-                    ).replace(' ', '').replace('\n', '').split('前')[0]
+                ).replace(' ', '').replace('\n', '').split('前')[0]
                 weibo['created_at'] = util.standardize_date(created_at)
                 source = sel.xpath('(.//p[@class="from"])[last()]/a[2]/text()'
                                    ).extract_first()
@@ -470,6 +516,12 @@ class SearchSpider(scrapy.Spider):
                         '@href').extract_first().split('/')[-1]
                     retweet['screen_name'] = info.xpath(
                         '@nick-name').extract_first()
+                    # 转发微博的用户类别
+                    user_type=info.xpath('..//a[2]/@title').extract_first()
+                    if not user_type:
+                        retweet['user_type'] ="其他"
+                    else:
+                        retweet['user_type'] =user_type
                     retweet['text'] = retweet_txt_sel.xpath(
                         'string(.)').extract_first().replace('\u200b',
                                                              '').replace(
@@ -497,6 +549,20 @@ class SearchSpider(scrapy.Spider):
                     comments_count = re.findall(r'\d+.*', comments_count)
                     retweet['comments_count'] = comments_count[
                         0] if comments_count else '0'
+
+                    #Crawl Comments
+                    if '万' in retweet['comments_count'] or int(retweet['comments_count'])>20:
+                        #详细微博的url
+                        comment_url='https://weibo.com/'+retweet['user_id']+'/'+retweet['bid']
+                        yield scrapy.Request(url=comment_url,
+                                            callback=self.parse_comments,
+                                            meta={
+                                                'weibo_id': retweet['id'],
+                                                'weibo_bid':retweet['bid'],
+                                                'weibo_user_id':retweet['user_id'],
+                                                'keyword': keyword
+                                                })           
+
                     attitudes_count = retweet_sel[0].xpath(
                         './/a[@action-type="feed_list_like"]/em/text()'
                     ).extract_first()
@@ -504,7 +570,7 @@ class SearchSpider(scrapy.Spider):
                                                   if attitudes_count else '0')
                     created_at = retweet_sel[0].xpath(
                         './/p[@class="from"]/a[1]/text()').extract_first(
-                        ).replace(' ', '').replace('\n', '').split('前')[0]
+                    ).replace(' ', '').replace('\n', '').split('前')[0]
                     retweet['created_at'] = util.standardize_date(created_at)
                     source = retweet_sel[0].xpath(
                         './/p[@class="from"]/a[2]/text()').extract_first()
@@ -514,5 +580,183 @@ class SearchSpider(scrapy.Spider):
                     retweet['retweet_id'] = ''
                     yield {'weibo': retweet, 'keyword': keyword}
                     weibo['retweet_id'] = retweet['id']
-                print(weibo)
+                # print(weibo)
                 yield {'weibo': weibo, 'keyword': keyword}
+
+    def parse_comments(self,response):
+        MAX_COMM_NUM=10000
+        WAIT_TIME=1
+
+        weibo_id=response.meta.get('weibo_id')
+        weibo_bid=response.meta.get('weibo_bid')
+        weibo_user_id=response.meta.get('weibo_user_id')
+        keyword=response.meta.get('keyword')
+
+        '''chrome options'''
+        chrome_options = Options()
+        chrome_options.add_argument('--headless')  # 使用无头谷歌浏览器模式
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('log-level=2') #log级别设为error
+        #通知设置，否则浏览器会弹出通知框
+        prefs = {
+            'profile.default_content_setting_values':{
+                'notifications':2
+            },
+            "profile.managed_default_content_settings.image": 2,
+
+        }        
+        chrome_options.add_experimental_option('prefs',prefs)
+        driver = webdriver.Chrome(
+            chrome_options=chrome_options, executable_path='E:\研三\weibo_crawl\chromedriver_win32/chromedriver.exe')
+
+        # 隐性等待1s
+        # driver.implicitly_wait(1)
+
+        #cookie
+        try:
+            driver.get(response.url)
+            time.sleep(WAIT_TIME)
+            if driver.current_url!=response.url:
+                driver.delete_all_cookies()
+                for cookie in self.login_cookies:
+                    driver.add_cookie(cookie)
+                driver.get(response.url)
+                time.sleep(WAIT_TIME)
+        except:
+            pass
+
+        #按热度排序
+        try:
+            WebDriverWait(driver, 3, 0.5).until(
+                            EC.visibility_of_element_located((By.XPATH, '//div[@node-type="feed_cate"]/ul[@class="clearfix"]//a[@suda-uatrack="key=comment&value=hotcomm"]')))   
+            hotcomm=driver.find_element_by_xpath('//div[@node-type="feed_cate"]/ul[@class="clearfix"]//a[@suda-uatrack="key=comment&value=hotcomm"]')  
+            hotcomm.click()
+            time.sleep(WAIT_TIME)
+        except:
+            pass       
+
+        try:
+            '''滚动到最后一条评论，循环滚动三次'''
+            js4 = "arguments[0].scrollIntoView();" 
+            WebDriverWait(driver, 3, 0.5).until(
+                EC.visibility_of_element_located((By.XPATH, '//div[@class="list_box"]/div[@class="list_ul"]/div[last()]')))
+
+            cur_last_comment=driver.find_element_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/div[last()]')
+            driver.execute_script(js4, cur_last_comment) 
+            time.sleep(WAIT_TIME)
+            cur_last_comment=driver.find_element_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/div[last()]')
+            driver.execute_script(js4, cur_last_comment) 
+            time.sleep(WAIT_TIME)
+            cur_last_comment=driver.find_element_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/div[last()]')
+            driver.execute_script(js4, cur_last_comment) 
+            time.sleep(WAIT_TIME)
+
+            #定位加载更多元素
+            WebDriverWait(driver, 3, 0.5).until(
+                EC.visibility_of_element_located((By.XPATH, '//div[@class="list_box"]/div[@class="list_ul"]/a[@action-type="click_more_comment"]')))
+            more_comment_ele=driver.find_element_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/a[@action-type="click_more_comment"]')
+
+            #点击加载更多，最多点击1000次
+            for _ in range(1000):
+                more_comment_ele.click()
+                time.sleep(WAIT_TIME)
+                
+                cur_last_comment=driver.find_element_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/div[last()]')
+                cur_last_comment=driver.find_element_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/div[last()]')
+                driver.execute_script(js4, cur_last_comment) 
+                time.sleep(WAIT_TIME)
+
+                cur_last_comment=driver.find_element_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/div[last()]')
+                cur_last_comment=driver.find_element_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/div[last()]')
+                driver.execute_script(js4, cur_last_comment)    
+                time.sleep(WAIT_TIME)             
+
+                WebDriverWait(driver, 3, 0.5).until(
+                    EC.visibility_of_element_located((By.XPATH, '//div[@class="list_box"]/div[@class="list_ul"]/a[@action-type="click_more_comment"]')))
+                more_comment_ele=driver.find_element_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/a[@action-type="click_more_comment"]')
+        except:
+            pass
+
+        #获取评论列表
+        try:
+            time.sleep(WAIT_TIME)
+            comments=driver.find_elements_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/div')
+            comments=driver.find_elements_by_xpath('//div[@class="list_box"]/div[@class="list_ul"]/div')
+            total_num=len(comments)
+        except:
+            driver.quit()
+            return
+
+        #解析每条评论
+        crawled_cnt=0
+        for comm_no in range(1,total_num+1):
+            comment_item=CommentItem()
+            comment_item['weibo_id']=weibo_id
+            comment_item['weibo_bid']=weibo_bid
+            comment_item['weibo_user_id']=weibo_user_id
+
+            xpath='//div[@class="list_box"]/div[@class="list_ul"]/div[{0}]'.format(comm_no)
+            ele=driver.find_element_by_xpath(xpath)
+            try:
+                comment_item['id']=ele.get_attribute('comment_id')
+            except:
+                print('comment id test!')
+
+            try:
+                WB_text=ele.find_element_by_xpath('./div[@class="list_con"]/div[@class="WB_text"]')
+            except:
+                continue
+
+            comment_item['user_id']=WB_text.find_element_by_xpath('./a[1]').get_attribute('href').split('/')[-1]
+            comment_item['screen_name']=WB_text.find_element_by_xpath('./a[1]').text
+
+            #user_type
+            user_type=[]
+            try:
+                title=WB_text.find_element_by_xpath('./a[@suda-data]/i').get_attribute('title')
+                user_type.append(title)
+            except:
+                pass
+
+            try:
+                type=WB_text.find_element_by_xpath('./a[@action-type]').get_attribute('title')
+                user_type.append(type)
+            except:
+                pass
+            if not user_type:
+                user_type='其他'
+            else:
+                user_type=';'.join(user_type)
+            comment_item['user_type']=user_type
+
+            #attitudes_count
+            comment_item['attitudes_count']=0
+            try:
+                like_count=ele.find_element_by_xpath('.//ul[@class="clearfix"]/li//span[@node-type="like_status"]/em[last()]').text
+                if like_count!='赞':
+                    comment_item['attitudes_count']=like_count
+            except:
+                pass
+                
+            #text
+            comment_item['text']=WB_text.text
+
+            #created at
+            try:
+                created_at=ele.find_element_by_xpath('./div[@class="list_con"]/div[@class="WB_func clearfix"]/div[@class="WB_from S_txt2"]').text.replace(' ', '').replace('\n', '').split('前')[0]
+                comment_item['created_at'] = created_at
+            except:
+                comment_item['created_at']='None'
+
+            yield {'comment': comment_item,'keyword': keyword}
+            crawled_cnt+=1
+            if crawled_cnt>MAX_COMM_NUM:
+                break
+               
+        driver.quit()
+        return 
+
+
+
+

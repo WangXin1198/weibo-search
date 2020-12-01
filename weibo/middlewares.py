@@ -6,6 +6,9 @@
 # https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
 from scrapy import signals
+import scrapy
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 
 
 class WeiboSpiderMiddleware(object):
@@ -71,13 +74,27 @@ class WeiboDownloaderMiddleware(object):
     def process_request(self, request, spider):
         # Called for each request that goes through the downloader
         # middleware.
-
         # Must either:
         # - return None: continue processing this request
         # - or return a Response object
         # - or return a Request object
         # - or raise IgnoreRequest: process_exception() methods of
         #   installed downloader middleware will be called
+
+        # if request.meta.get('comments_count') and request.meta.get('comments_count') > 10:
+        #     chrome_options = Options()
+        #     chrome_options.add_argument('--headless')  # 使用无头谷歌浏览器模式
+        #     chrome_options.add_argument('--disable-gpu')
+        #     chrome_options.add_argument('--no-sandbox')
+        #     self.driver = webdriver.Chrome(
+        #         chrome_options=chrome_options, executable_path='E:\研三\weibo_crawl\chromedriver_win32/chromedriver.exe')
+
+        #     self.driver.get(request.url)
+        #     time.sleep(1)
+        #     html = self.driver.page_source
+        #     self.driver.quit()
+        #     return scrapy.http.HtmlResponse(url=request.url, body=html.encode('utf-8'), encoding='utf-8', request=request)
+
         return None
 
     def process_response(self, request, response, spider):
