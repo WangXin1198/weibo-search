@@ -1,0 +1,6 @@
+/结果文件Json
+/checkpoint
+/debug.log
+/count_crawled_num.py
+*.json
+*.pyc
